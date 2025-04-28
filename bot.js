@@ -37,10 +37,7 @@ const AUTO_MONITORED_BETAS = [
   "72eyUWVE", // Instagram
   "Gu9kI6ky", // Capcut
   "1SyedSId", // Spotify
-  "gdE4pRzI", // Discord
-  "s4rTJVPb", // WhatsApp
-  "oscYikr0", // WhatsApp Business
-  "3EsotSOl"  // Twitter
+  "gdE4pRzI" // Discord
   // Tambahkan kode beta lainnya di sini jika perlu
 ];
 
