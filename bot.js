@@ -5,61 +5,44 @@ const axios = require('axios');
 
 // Konfigurasi dari file .env
 const token = process.env.TELEGRAM_BOT_TOKEN;
-const apiUrl = process.env.API_URL;
+const channelId = process.env.CHANNEL_ID; // ID Channel untuk notifikasi
+const apiUrl = process.env.API_URL; // Opsional, jika masih digunakan
 const testflightUrl = process.env.TESTFLIGHT_URL || 'https://testflight.apple.com';
 
-// Membuat instance bot
-const bot = new TelegramBot(token, { polling: true });
+// Validasi konfigurasi penting
+if (!token) {
+  console.error("Error: TELEGRAM_BOT_TOKEN tidak ditemukan di .env");
+  process.exit(1);
+}
+if (!channelId) {
+  console.error("Error: CHANNEL_ID tidak ditemukan di .env");
+  process.exit(1);
+}
 
-// Variabel untuk pemantauan TestFlight
-const monitoredApps = {
-  // Format: 'betaCode': { lastStatus: 'full'/'available', chatIds: [array of chat IDs to notify] }
+// Membuat instance bot
+const bot = new TelegramBot(token); // Polling tidak diperlukan jika tidak ada interaksi
+
+// Variabel untuk menyimpan status terakhir beta yang dipantau
+const monitoredBetaStatus = {
+  // Format: 'betaCode': { lastStatus: 'full'/'available'/'unknown', appName: '...', version: {...} }
 };
 
-// Interval waktu untuk pemeriksaan dalam milidetik (default: 30 menit)
-const CHECK_INTERVAL = process.env.CHECK_INTERVAL || 30 * 60 * 1000;
+// Interval waktu untuk pemeriksaan dalam milidetik
+// Membaca dari .env, default ke 1800000ms (30 menit) jika tidak ada.
+const CHECK_INTERVAL = parseInt(process.env.CHECK_INTERVAL || '1800000', 10);
 
-// Handler untuk pesan /start
-bot.onText(/\/start/, (msg) => {
-  const chatId = msg.chat.id;
-  bot.sendMessage(chatId, 'Selamat datang! Saya adalah bot yang terhubung dengan API. Gunakan /help untuk melihat perintah yang tersedia.');
-});
-
-// Handler untuk pesan /help
-bot.onText(/\/help/, (msg) => {
-  const chatId = msg.chat.id;
-  bot.sendMessage(chatId, `
-Perintah yang tersedia:
-/start - Memulai bot
-/help - Menampilkan pesan bantuan
-/data - Mengambil data dari API
-/testflight [kode] - Memeriksa status beta app di TestFlight
-/monitor [kode] - Memantau beta app dan beri tahu jika tersedia
-/stopmonitor [kode] - Berhenti memantau beta app
-/showmonitor - Menampilkan daftar beta yang sedang dipantau
-/version [kode] - Mendapatkan info versi beta TestFlight
-/screenshots [kode] - Menampilkan screenshot aplikasi (jika tersedia)
-  `);
-});
-
-// Handler untuk pesan /data
-bot.onText(/\/data/, async (msg) => {
-  const chatId = msg.chat.id;
-  
-  try {
-    // Mengirim pesan loading
-    bot.sendMessage(chatId, 'Mengambil data dari API...');
-    
-    // Memanggil API menggunakan axios
-    const response = await axios.get(apiUrl);
-    
-    // Mengirim data dari API ke pengguna
-    bot.sendMessage(chatId, `Data dari API:\n${JSON.stringify(response.data, null, 2)}`);
-  } catch (error) {
-    console.error('Error saat mengambil data:', error.message);
-    bot.sendMessage(chatId, 'Maaf, terjadi kesalahan saat mengambil data dari API.');
-  }
-});
+// Daftar beta kode yang akan selalu dipantau secara otomatis
+const AUTO_MONITORED_BETAS = [
+  // Masukkan kode beta yang ingin selalu dipantau di sini
+  "72eyUWVE", // Instagram
+  "Gu9kI6ky", // Capcut
+  "1SyedSId", // Spotify
+  "gdE4pRzI", // Discord
+  "s4rTJVPb", // WhatsApp
+  "oscYikr0", // WhatsApp Business
+  "3EsotSOl"  // Twitter
+  // Tambahkan kode beta lainnya di sini jika perlu
+];
 
 // Fungsi untuk memeriksa status TestFlight
 async function checkTestFlightStatus(betaCode) {
@@ -71,7 +54,9 @@ async function checkTestFlightStatus(betaCode) {
         'Accept-Language': 'en-US,en;q=0.9',
         'Cache-Control': 'max-age=0',
         'Cookie': 'geo=ID'
-      }
+      },
+      // Tambahkan timeout untuk mencegah hang
+      timeout: 15000 // 15 detik
     };
     
     // Request ke TestFlight
@@ -88,13 +73,13 @@ async function checkTestFlightStatus(betaCode) {
     
     // Ekstrak deskripsi
     const descMatch = html.match(/<p class="step3">(.*?)<\/p>/s);
-    let description = descMatch ? descMatch[1].trim() : '';
+    let description = descMatch ? descMatch[1].trim().replace(/<[^>]*>?/gm, '') : ''; // Hapus tag HTML
     // Batasi deskripsi jika terlalu panjang
     if (description.length > 200) {
       description = description.substring(0, 200) + '...';
     }
     
-    // Ekstrak versi beta (baru)
+    // Ekstrak versi beta
     let version = null;
     const versionMatch = html.match(/Version ([0-9.]+) \(Build ([0-9.]+)\)/);
     if (versionMatch) {
@@ -104,7 +89,7 @@ async function checkTestFlightStatus(betaCode) {
       };
     }
     
-    // Ekstrak screenshot (baru)
+    // Ekstrak screenshot (tidak digunakan untuk notifikasi channel, bisa dihapus jika mau)
     const screenshots = [];
     const screenshotMatches = html.matchAll(/image:\s*url\((https:\/\/is\d+-ssl\.mzstatic\.com\/image\/thumb\/[^)]+)\)/g);
     if (screenshotMatches) {
@@ -133,389 +118,131 @@ async function checkTestFlightStatus(betaCode) {
       description, 
       betaCode,
       version, 
-      screenshots: screenshots.slice(0, 5)  // Ambil 5 screenshot pertama saja
+      screenshots: screenshots.slice(0, 1) // Hanya ambil 1 screenshot jika diperlukan
     };
   } catch (error) {
-    console.error(`Error memeriksa status TestFlight ${betaCode}:`, error.message);
-    return { status: 'error', error: error.message, betaCode };
+    // Tangani error spesifik seperti timeout atau network error
+    let errorMessage = error.message;
+    if (error.code === 'ECONNABORTED') {
+      errorMessage = 'Request timeout';
+    } else if (error.response) {
+      errorMessage = `HTTP Error ${error.response.status}`;
+    } 
+    console.error(`Error memeriksa status TestFlight ${betaCode}:`, errorMessage);
+    return { status: 'error', error: errorMessage, betaCode };
   }
 }
 
-// Handler untuk memeriksa status TestFlight
-bot.onText(/\/testflight (.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const betaCode = match[1]; // Kode beta dari pesan
+// Fungsi untuk mengirim notifikasi ke channel
+async function sendChannelNotification(betaInfo) {
+  const { appName, description, version, betaCode, iconUrl, screenshots } = betaInfo;
+  const now = new Date();
+
+  console.log(`[${now.toISOString()}] Beta ${betaCode} (${appName}) sekarang TERSEDIA! Mengirim notifikasi ke channel ${channelId}.`);
+
+  let message = `🚨 *TESTFLIGHT TERSEDIA!*\n\n`;
+  message += `Beta *${appName}* tersedia untuk diikuti!\n\n`;
   
+  if (description) {
+    message += `${description}\n\n`;
+  }
+  
+  if (version) {
+    message += `*Versi:* ${version.versionNumber} (Build ${version.buildNumber})\n\n`;
+  }
+  
+  message += `*Cara bergabung:*\n`;
+  message += `1. Install aplikasi TestFlight dari App Store.\n`;
+  message += `2. Buka link: ${testflightUrl}/join/${betaCode}\n\n`;
+  message += `Kode: \`${betaCode}\``;
+
   try {
-    // Mengirim pesan loading
-    bot.sendMessage(chatId, `Memeriksa status beta TestFlight dengan kode: ${betaCode}...`);
-    
-    const result = await checkTestFlightStatus(betaCode);
-    
-    if (result.status === 'full') {
-      // Status: Beta penuh
-      let message = `❌ *Beta ${result.appName} sudah penuh.*\n\nKode: \`${betaCode}\``;
-      
-      // Tambahkan info versi jika tersedia
-      if (result.version) {
-        message += `\n\n*Versi:* ${result.version.versionNumber} (Build ${result.version.buildNumber})`;
+    if (iconUrl) {
+      // Kirim foto dengan caption
+      await bot.sendPhoto(channelId, iconUrl, {
+        caption: message,
+        parse_mode: 'Markdown'
+      });
+      // Kirim screenshot (jika ada) sebagai pesan terpisah untuk menghindari caption terpotong
+      if (screenshots && screenshots.length > 0) {
+         await new Promise(resolve => setTimeout(resolve, 500)); // Delay kecil
+         await bot.sendPhoto(channelId, screenshots[0], {
+             caption: `Screenshot ${appName}`
+         });
       }
-      
-      message += `\n[Lihat di TestFlight](${testflightUrl}/join/${betaCode})`;
-      
-      if (result.iconUrl) {
-        await bot.sendPhoto(chatId, result.iconUrl, {
-          caption: message,
-          parse_mode: 'Markdown'
+    } else {
+      // Kirim pesan teks biasa
+      await bot.sendMessage(channelId, message, { parse_mode: 'Markdown' });
+      // Kirim screenshot jika ada
+      if (screenshots && screenshots.length > 0) {
+        await new Promise(resolve => setTimeout(resolve, 500)); // Delay kecil
+        await bot.sendPhoto(channelId, screenshots[0], {
+            caption: `Screenshot ${appName}`
         });
-      } else {
-        await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
       }
-    } else if (result.status === 'available') {
-      // Status: Beta tersedia
-      let message = `✅ *Beta ${result.appName} tersedia untuk diikuti!*\n\n`;
-      
-      if (result.description) {
-        message += `${result.description}\n\n`;
-      }
-      
-      // Tambahkan info versi jika tersedia
-      if (result.version) {
-        message += `*Versi:* ${result.version.versionNumber} (Build ${result.version.buildNumber})\n\n`;
-      }
-      
-      message += `*Cara bergabung:*\n`;
-      message += `1. Install aplikasi TestFlight dari App Store\n`;
-      message += `2. Buka link: ${testflightUrl}/join/${betaCode}\n\n`;
-      message += `Kode: \`${betaCode}\``;
-      
-      if (result.iconUrl) {
-        await bot.sendPhoto(chatId, result.iconUrl, {
-          caption: message,
-          parse_mode: 'Markdown'
-        });
-      } else {
-        await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-      }
-      
-      // Kirim screenshot jika tersedia (1-2 screenshot saja)
-      if (result.screenshots && result.screenshots.length > 0) {
-        await bot.sendMessage(chatId, `*Screenshot ${result.appName}:* (${result.screenshots.length} tersedia)`, { parse_mode: 'Markdown' });
-        
-        // Kirim 2 screenshot pertama
-        for (let i = 0; i < Math.min(2, result.screenshots.length); i++) {
-          await bot.sendPhoto(chatId, result.screenshots[i]);
-        }
-        
-        if (result.screenshots.length > 2) {
-          await bot.sendMessage(chatId, `Gunakan perintah \`/screenshots ${betaCode}\` untuk melihat semua screenshot.`, { parse_mode: 'Markdown' });
-        }
-      }
-    } else {
-      // Status tidak diketahui/tidak valid
-      await bot.sendMessage(
-        chatId, 
-        `⚠️ Tidak dapat menentukan status beta dengan kode \`${betaCode}\`. Mungkin kode tidak valid atau halaman berubah format.`,
-        { parse_mode: 'Markdown' }
-      );
     }
-  } catch (error) {
-    console.error('Error saat memeriksa TestFlight:', error.message);
-    bot.sendMessage(
-      chatId, 
-      `⚠️ Terjadi kesalahan saat memeriksa beta TestFlight: ${error.message}\n\nPastikan kode beta valid.`
-    );
+    console.log(`[${now.toISOString()}] Notifikasi untuk ${betaCode} berhasil dikirim ke channel ${channelId}.`);
+  } catch (notifyError) {
+    console.error(`[${now.toISOString()}] GAGAL mengirim notifikasi ke channel ${channelId} untuk ${betaCode}:`, notifyError.message);
+    // Pertimbangkan penanganan error lebih lanjut, misal coba lagi atau notifikasi admin
+    if (notifyError.response && notifyError.response.statusCode === 403) {
+        console.error(`Pastikan bot adalah admin di channel ${channelId} dan memiliki izin mengirim pesan/media.`);
+    } else if (notifyError.response && notifyError.response.statusCode === 400) {
+        console.error(`Bad Request saat mengirim ke channel. Periksa format pesan atau ID channel.`);
+    }
   }
-});
+}
 
-// Handler untuk mendapatkan info versi beta
-bot.onText(/\/version (.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const betaCode = match[1]; // Kode beta dari pesan
+// Fungsi utama untuk memeriksa semua beta yang dipantau
+async function checkMonitoredBetas() {
+  const now = new Date();
+  console.log(`[${now.toISOString()}] Memulai pemeriksaan untuk ${AUTO_MONITORED_BETAS.length} beta TestFlight...`);
+  let availableBetasCount = 0;
   
-  try {
-    // Mengirim pesan loading
-    bot.sendMessage(chatId, `Mengambil info versi untuk beta dengan kode: ${betaCode}...`);
-    
-    const result = await checkTestFlightStatus(betaCode);
-    
-    if (result.version) {
-      let message = `📱 *Info Versi ${result.appName}*\n\n`;
-      message += `*Versi:* ${result.version.versionNumber}\n`;
-      message += `*Build:* ${result.version.buildNumber}\n`;
-      message += `*Status:* ${result.status === 'full' ? '❌ Penuh' : result.status === 'available' ? '✅ Tersedia' : '⚠️ Tidak diketahui'}\n`;
-      message += `*Kode Beta:* \`${betaCode}\``;
-      
-      await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-    } else {
-      await bot.sendMessage(chatId, `⚠️ Tidak dapat mengambil info versi untuk beta dengan kode \`${betaCode}\`.`, { parse_mode: 'Markdown' });
-    }
-  } catch (error) {
-    console.error('Error saat mengambil info versi:', error.message);
-    bot.sendMessage(
-      chatId, 
-      `⚠️ Terjadi kesalahan saat mengambil info versi: ${error.message}`
-    );
-  }
-});
-
-// Handler untuk mendapatkan screenshot aplikasi
-bot.onText(/\/screenshots (.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const betaCode = match[1]; // Kode beta dari pesan
-  
-  try {
-    // Mengirim pesan loading
-    bot.sendMessage(chatId, `Mencari screenshot untuk beta dengan kode: ${betaCode}...`);
-    
-    const result = await checkTestFlightStatus(betaCode);
-    
-    if (result.screenshots && result.screenshots.length > 0) {
-      await bot.sendMessage(
-        chatId, 
-        `*Screenshot ${result.appName}* (${result.screenshots.length} ditemukan):`,
-        { parse_mode: 'Markdown' }
-      );
-      
-      // Kirim semua screenshot yang ditemukan (max 5 untuk menghindari spam)
-      const maxScreenshots = Math.min(5, result.screenshots.length);
-      for (let i = 0; i < maxScreenshots; i++) {
-        await bot.sendPhoto(chatId, result.screenshots[i]);
-        
-        // Delay kecil untuk menghindari rate limit
-        await new Promise(resolve => setTimeout(resolve, 500));
-      }
-      
-      if (result.screenshots.length > maxScreenshots) {
-        await bot.sendMessage(
-          chatId, 
-          `⚠️ Hanya menampilkan ${maxScreenshots} dari ${result.screenshots.length} screenshot yang tersedia.`
-        );
-      }
-    } else {
-      await bot.sendMessage(
-        chatId, 
-        `⚠️ Tidak ditemukan screenshot untuk beta ${result.appName || 'ini'}.`
-      );
-    }
-  } catch (error) {
-    console.error('Error saat mengambil screenshot:', error.message);
-    bot.sendMessage(
-      chatId, 
-      `⚠️ Terjadi kesalahan saat mengambil screenshot: ${error.message}`
-    );
-  }
-});
-
-// Handler untuk memulai pemantauan beta
-bot.onText(/\/monitor (.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const betaCode = match[1]; // Kode beta dari pesan
-  
-  try {
-    // Periksa status saat ini
-    const result = await checkTestFlightStatus(betaCode);
-    
-    // Inisialisasi atau update data pemantauan
-    if (!monitoredApps[betaCode]) {
-      monitoredApps[betaCode] = {
-        lastStatus: result.status,
-        chatIds: [chatId],
-        appName: result.appName,
-        lastChecked: new Date(),
-        version: result.version
-      };
-    } else if (!monitoredApps[betaCode].chatIds.includes(chatId)) {
-      monitoredApps[betaCode].chatIds.push(chatId);
-      // Update nama app jika tidak diketahui sebelumnya
-      if (monitoredApps[betaCode].appName === 'Unknown App' && result.appName !== 'Unknown App') {
-        monitoredApps[betaCode].appName = result.appName;
-      }
-      // Update versi jika tersedia
-      if (result.version) {
-        monitoredApps[betaCode].version = result.version;
-      }
-    }
-    
-    let message = `🔔 Pemantauan beta *${result.appName}* dengan kode \`${betaCode}\` telah diaktifkan!\n\n`;
-    message += `Status saat ini: ${result.status === 'full' ? '❌ Penuh' : result.status === 'available' ? '✅ Tersedia' : '⚠️ Tidak diketahui'}\n`;
-    
-    // Tambahkan info versi jika tersedia
-    if (result.version) {
-      message += `Versi: ${result.version.versionNumber} (Build ${result.version.buildNumber})\n`;
-    }
-    
-    message += `\nAnda akan menerima notifikasi jika status berubah dari penuh menjadi tersedia.`;
-    
-    await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-  } catch (error) {
-    console.error('Error saat mengaktifkan pemantauan:', error.message);
-    bot.sendMessage(
-      chatId,
-      `⚠️ Terjadi kesalahan saat mengaktifkan pemantauan beta: ${error.message}`
-    );
-  }
-});
-
-// Handler untuk menghentikan pemantauan beta
-bot.onText(/\/stopmonitor (.+)/, (msg, match) => {
-  const chatId = msg.chat.id;
-  const betaCode = match[1]; // Kode beta dari pesan
-  
-  if (monitoredApps[betaCode] && monitoredApps[betaCode].chatIds.includes(chatId)) {
-    // Hapus chatId dari daftar
-    monitoredApps[betaCode].chatIds = monitoredApps[betaCode].chatIds.filter(id => id !== chatId);
-    
-    // Jika tidak ada yang memantau lagi, hapus dari daftar
-    if (monitoredApps[betaCode].chatIds.length === 0) {
-      delete monitoredApps[betaCode];
-    }
-    
-    bot.sendMessage(
-      chatId,
-      `🔕 Pemantauan beta dengan kode \`${betaCode}\` telah dinonaktifkan.`,
-      { parse_mode: 'Markdown' }
-    );
-  } else {
-    bot.sendMessage(
-      chatId,
-      `⚠️ Anda tidak memantau beta dengan kode \`${betaCode}\`.`,
-      { parse_mode: 'Markdown' }
-    );
-  }
-});
-
-// Handler untuk menampilkan beta yang dipantau
-bot.onText(/\/showmonitor/, (msg) => {
-  const chatId = msg.chat.id;
-  
-  // Filter beta yang dipantau oleh pengguna ini
-  const userMonitored = Object.entries(monitoredApps).filter(
-    ([_, app]) => app.chatIds.includes(chatId)
-  );
-  
-  if (userMonitored.length === 0) {
-    bot.sendMessage(chatId, '📝 Anda tidak memantau beta TestFlight apa pun.');
-    return;
-  }
-  
-  let message = '📝 *Daftar Beta TestFlight yang Dipantau:*\n\n';
-  
-  userMonitored.forEach(([betaCode, app]) => {
-    const lastCheckedTime = app.lastChecked ? 
-      `${app.lastChecked.toLocaleDateString()} ${app.lastChecked.toLocaleTimeString()}` : 
-      'Belum diperiksa';
-      
-    message += `*${app.appName || 'App'}* (\`${betaCode}\`)\n`;
-    message += `Status terakhir: ${app.lastStatus === 'full' ? '❌ Penuh' : app.lastStatus === 'available' ? '✅ Tersedia' : '⚠️ Tidak diketahui'}\n`;
-    
-    // Tambahkan info versi jika tersedia
-    if (app.version) {
-      message += `Versi: ${app.version.versionNumber} (Build ${app.version.buildNumber})\n`;
-    }
-    
-    message += `Pemeriksaan terakhir: ${lastCheckedTime}\n\n`;
-  });
-  
-  bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-});
-
-// Fungsi untuk memeriksa semua beta yang dipantau
-async function checkAllMonitoredApps() {
-  console.log(`[${new Date().toISOString()}] Memeriksa ${Object.keys(monitoredApps).length} beta TestFlight yang dipantau...`);
-  
-  for (const [betaCode, app] of Object.entries(monitoredApps)) {
+  for (const betaCode of AUTO_MONITORED_BETAS) {
     try {
       const result = await checkTestFlightStatus(betaCode);
-      const now = new Date();
+      const previousStatusInfo = monitoredBetaStatus[betaCode];
+      const previousStatus = previousStatusInfo ? previousStatusInfo.lastStatus : 'unknown';
       
-      // Update status terakhir dan waktu pemeriksaan
-      monitoredApps[betaCode].lastStatus = result.status;
-      monitoredApps[betaCode].lastChecked = now;
+      // Update status terakhir di memori
+      monitoredBetaStatus[betaCode] = { 
+          lastStatus: result.status,
+          appName: result.appName, // Simpan nama app
+          version: result.version // Simpan versi
+      };
       
-      // Update nama app jika berubah
-      if (result.appName !== 'Unknown App') {
-        monitoredApps[betaCode].appName = result.appName;
+      // Log perubahan status (opsional, untuk debugging)
+      if (result.status !== 'error' && result.status !== previousStatus) {
+          console.log(`[${now.toISOString()}] Status ${betaCode} (${result.appName}) berubah dari ${previousStatus} -> ${result.status}`);
+      }
+
+      // Jika status berubah menjadi 'available' (dari status lain, termasuk unknown/error/full)
+      if (result.status === 'available' && previousStatus !== 'available') {
+         availableBetasCount++;
+         await sendChannelNotification(result);
       }
       
-      // Update versi jika tersedia
-      if (result.version) {
-        monitoredApps[betaCode].version = result.version;
-      }
-      
-      // Jika status berubah dari full ke available, beri tahu semua pengguna yang memantau beta ini
-      if (app.lastStatus === 'full' && result.status === 'available') {
-        console.log(`[${now.toISOString()}] Beta ${betaCode} (${result.appName}) sekarang TERSEDIA! Mengirim notifikasi ke ${app.chatIds.length} pengguna.`);
-        
-        let message = `🎉 *KABAR BAIK!* Beta *${result.appName}* sekarang TERSEDIA!\n\n`;
-        
-        if (result.description) {
-          message += `${result.description}\n\n`;
-        }
-        
-        // Tambahkan info versi jika tersedia
-        if (result.version) {
-          message += `*Versi:* ${result.version.versionNumber} (Build ${result.version.buildNumber})\n\n`;
-        }
-        
-        message += `*Cara bergabung:*\n`;
-        message += `1. Install aplikasi TestFlight dari App Store\n`;
-        message += `2. Buka link: ${testflightUrl}/join/${betaCode}\n\n`;
-        message += `Kode: \`${betaCode}\``;
-        
-        // Kirim notifikasi ke semua pengguna yang memantau
-        for (const chatId of app.chatIds) {
-          try {
-            if (result.iconUrl) {
-              await bot.sendPhoto(chatId, result.iconUrl, {
-                caption: message,
-                parse_mode: 'Markdown'
-              });
-            } else {
-              await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-            }
-            
-            // Kirim 1 screenshot jika tersedia
-            if (result.screenshots && result.screenshots.length > 0) {
-              await bot.sendPhoto(chatId, result.screenshots[0], {
-                caption: `Screenshot ${result.appName} (${result.screenshots.length > 1 ? `+${result.screenshots.length-1} lainnya` : ''})`
-              });
-              
-              if (result.screenshots.length > 1) {
-                await bot.sendMessage(
-                  chatId, 
-                  `Gunakan perintah \`/screenshots ${betaCode}\` untuk melihat semua screenshot.`, 
-                  { parse_mode: 'Markdown' }
-                );
-              }
-            }
-          } catch (notifyError) {
-            console.error(`Error mengirim notifikasi ke ${chatId}:`, notifyError.message);
-          }
-        }
-      }
     } catch (error) {
-      console.error(`Error memeriksa beta ${betaCode}:`, error.message);
+      // Error ini seharusnya sudah ditangani di checkTestFlightStatus, tapi sebagai jaring pengaman
+      console.error(`[${now.toISOString()}] Error tidak terduga saat memproses beta ${betaCode}:`, error.message);
     }
     
-    // Tidur sedikit antar permintaan untuk menghindari rate limiting
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // Tambahkan jeda antar permintaan untuk menghindari rate limiting TestFlight
+    // Jeda 5-10 detik direkomendasikan jika banyak kode beta
+    await new Promise(resolve => setTimeout(resolve, 5000)); // Jeda 5 detik
   }
+  console.log(`[${now.toISOString()}] Pemeriksaan selesai. ${availableBetasCount} beta baru tersedia ditemukan.`);
 }
 
+// Jalankan pemeriksaan pertama setelah beberapa detik startup
+setTimeout(checkMonitoredBetas, 5000); 
+
 // Jadwalkan pemeriksaan rutin
-setInterval(checkAllMonitoredApps, CHECK_INTERVAL);
-
-// Handler untuk semua pesan teks lainnya
-bot.on('message', (msg) => {
-  if (msg.text && !msg.text.startsWith('/')) {
-    const chatId = msg.chat.id;
-    bot.sendMessage(chatId, 'Saya hanya memahami perintah. Gunakan /help untuk melihat perintah yang tersedia.');
-  }
-});
-
-// Jalankan pemeriksaan pertama setelah 5 detik startup
-setTimeout(checkAllMonitoredApps, 5000);
+setInterval(checkMonitoredBetas, CHECK_INTERVAL);
 
 // Log ketika bot dimulai
-console.log('Bot Telegram telah dimulai!'); 
+console.log('Bot Telegram (Mode Channel) telah dimulai!');
+console.log(`Mengirim notifikasi ke Channel ID: ${channelId}`);
+console.log(`Memantau ${AUTO_MONITORED_BETAS.length} kode beta: ${AUTO_MONITORED_BETAS.join(', ')}`);
+console.log(`Interval pemeriksaan: ${CHECK_INTERVAL / 1000} detik (${CHECK_INTERVAL / 60000} menit)`); 
